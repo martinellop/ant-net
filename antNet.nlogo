@@ -20,12 +20,15 @@ ants-own[
   n-hops
   travel-time
   generation
+  time-to-target
 ]
 
 globals[
   alpha_1_factor ;;the tollerance for number of hops and best travel time, for ants which first hop was the same of the best ant's one
   alpha_2_factor ;;the tollerance for number of hops and best travel time, for ants which first hop was not the same of the best ant's one
   ant-generation-memory
+  t_hop ; param which represent the time to take one hop in unloaded conditions.
+  gamma_factor ; param in [0,1] which represent how much the memory of pheromone table is static respect new data. 1 means that pheremone table doesnt update.
 ]
 
 
@@ -36,6 +39,7 @@ to setup
   set alpha_1_factor 0.9
   set alpha_2_factor 2.0
   set ant-generation-memory 1000
+  set t_hop 3e-3
 
   setup-nodes
   reset-ticks
@@ -94,28 +98,35 @@ to send-forward-ants
 
 
   ask source[
-    let next-node get-way-for-target-node target
+    let nextnode get-way-for-target-node target
     let g random 1000000
-    if next-node < 0 [
-      ask link-neighbors [
-        ; Create a new ant for each link
-        let neig self
+
+    let next-nodes []
+    ifelse nextnode = nobody
+    [
+      ;let neighbors-excluding-node filter [neighbor -> neighbor != sender and neighbor != ant-owner] link-neighbors
+      set next-nodes [self] of link-neighbors
+    ]
+    [set next-nodes lput nextnode next-nodes]
+
+    foreach next-nodes [ id ->
+      ; Create a new ant for each link
         hatch-ants 1[
           set color pink
           set shape "bug"
           set size 3
           set forward-ant? true
           setxy [xcor] of source [ycor] of source
-          face neig
+          face id
           set owner-node source
           set previous source
-          set next neig
+          set next id
           set target-node target
           set n-hops 0
           set travel-time 0
           set generation g
-          set visited-nodes []
-        ]
+          set time-to-target 0
+          set visited-nodes (list source)
       ]
     ]
   ]
@@ -123,7 +134,7 @@ end
 
 to-report get-way-for-target-node [target]
   ;; To be executed by a node when it asks itslef which way to take in order to reach the node "target".
-  ;; if the return value is negative, then the "query-node" has no clue. Otherwise, the returned value is the next node to ask for, closer to target.
+  ;; if the return value is nobody, then the "query-node" has no clue. Otherwise, the returned value is the next node to ask for, closer to target.
 
 
   let nodes-list []
@@ -138,14 +149,14 @@ to-report get-way-for-target-node [target]
     ]
   ]
 
-  if length nodes-list = 0 [report -1] ;if we are here, we have no clue about how to reach the target node
+  if length nodes-list = 0 [report nobody] ;if we are here, we have no clue about how to reach the target node
 
   report sample-element nodes-list goodness-list
 end
 
 to-report sample-element [n p] ;it returns one of the possibility stochastichally, based on input weights for each possibility
   let total-probability sum p
-  let random-value random total-probability
+  let random-value random-float total-probability
 
   let cumulative-probability 0
   let selected-element nobody
@@ -154,12 +165,10 @@ to-report sample-element [n p] ;it returns one of the possibility stochastichall
     if random-value >= cumulative-probability and random-value < cumulative-probability + ? [
       let index position ? p
       set selected-element item index n
-      stop
+      report selected-element
     ]
     set cumulative-probability cumulative-probability + ?
   ]
-
-  report selected-element
 end
 
 
@@ -173,6 +182,8 @@ to update-ants
       [ask a[die]]
     ]
     set travel-time travel-time + 1
+    if not forward-ant?
+    [set time-to-target time-to-target + 1]
 
     face next
     let delta_s 50 * movement-speed
@@ -219,7 +230,7 @@ to new-ant-arrived-to-node [a]
     let g [generation] of a
     let h [n-hops] of a
     let tt [travel-time] of a
-    let fh item 0 [visited-nodes] of a
+    let fh item 1 [visited-nodes] of a
 
     let found 0
     foreach generation-table[ ? ->
@@ -266,12 +277,14 @@ to new-ant-arrived-to-node [a]
     let ant-owner [owner-node] of a
     let sender [previous] of a
     let next-nodes []
-    ifelse nextnode >= 0 [set next-nodes lput nextnode next-nodes]
+
+    ifelse nextnode = nobody
     [
       ;let neighbors-excluding-node filter [neighbor -> neighbor != sender and neighbor != ant-owner] link-neighbors
-      set next-nodes [self] of nodes with [self != sender and self != ant-owner]
-
+      set next-nodes [self] of link-neighbors with [self != sender and self != ant-owner]
     ]
+    [set next-nodes lput nextnode next-nodes]
+
     foreach next-nodes[ id ->
       hatch-ants 1[
         set color [color] of a
@@ -300,9 +313,12 @@ to new-ant-arrived-to-node [a]
   if not [forward-ant?] of a
   [
     ;;in this case, we are backward ants
+
+    update-pheromone-table a
+
     ifelse [owner-node] of a = this_node
     [
-      print "arrived home"
+      ;print "arrived home"
       ask a [die]
     ]
     [
@@ -311,14 +327,44 @@ to new-ant-arrived-to-node [a]
         let index position this_node visited-nodes
         set index index - 1
         set previous this_node
-        ifelse index >= 0
-        [set next item index visited-nodes]
-        [set next owner-node]
+        set next item index visited-nodes
       ]
     ]
   ]
 
 
+end
+
+to update-pheromone-table [a]
+  ;;to be invoked by a node, when it receives a backward ant
+  let this_node self
+  let target [target-node] of a
+  let nxt [previous] of a ;NOTE: it is previous 'cause we still didn't update the reference with the new one.
+  let t-time [time-to-target] of a
+  let hops length [visited-nodes] of a - position this_node [visited-nodes] of a - 1
+
+  ;; this value represents a measure about how good it is taking this route (so far) to go to target-node
+  let route-value 2 / (t-time + (hops * t_hop))
+
+  foreach pheromone-table [ ? ->
+    if item 0 ? = target and item 1 ? = nxt
+    [
+      ;let's update this value
+      let old_value item 2 ?
+      let new-value gamma_factor * old_value + ((1 - gamma_factor) * route-value)
+
+      let index position ? pheromone-table
+      let new-entry (list target nxt new-value)
+
+      ;; let's update the entry with the updated data.
+      set pheromone-table replace-item index pheromone-table new-entry
+      stop
+    ]
+  ]
+
+  ; if we are here, then this entry was not present in the table. Let's add it.
+  let new-entry (list target nxt route-value)
+  set pheromone-table lput new-entry pheromone-table
 end
 
 
