@@ -1,14 +1,26 @@
-extensions [matrix]
-
-
 breed [nodes node]
 breed [ants ant]
+breed [packets packet]
 
 nodes-own [
   pheromone-table ;; list where each entry is a list in form [t n v], where t is the target node, n is a linked node and v is a value about the goodness of going to t through n.
   generation-table ;;list where each entry is a list in form [g h tt fh ts], where g is the ant generation, h is the number of hops of the best ant, tt is its travel time, fh its first hop and ts is the timestamp about when the entry eas accessed last time
+
+  ;; the following are just for sake of simulation
+  target-dest
+  next-send-time
+  messages-in-a-row
+  buffered-packets
 ]
 
+packets-own[
+  target-node
+  owner-node
+  next
+  previous
+  message
+  waiting?
+]
 
 ants-own[
   target-node
@@ -29,6 +41,7 @@ globals[
   ant-generation-memory
   t_hop ; param which represent the time to take one hop in unloaded conditions.
   gamma_factor ; param in [0,1] which represent how much the memory of pheromone table is static respect new data. 1 means that pheremone table doesnt update.
+  ant-every-n-packets ; after many data packets should we send a proactive ant?
 ]
 
 
@@ -40,6 +53,7 @@ to setup
   set alpha_2_factor 2.0
   set ant-generation-memory 1000
   set t_hop 3e-3
+  set ant-every-n-packets 5
 
   setup-nodes
   reset-ticks
@@ -52,10 +66,19 @@ to setup-nodes
     set size 5
     set pheromone-table []
     set generation-table []
+    set target-dest nobody
+    set next-send-time 0
+    set messages-in-a-row 0
+    set buffered-packets []
   ]
   ask node 0 [
   set color red
   ]
+
+  ask node 5 [
+  set color cyan
+  ]
+
   ask node 10 [
   set color yellow
   ]
@@ -66,6 +89,7 @@ to go
   update-nodes
   update-links
   update-ants
+  update-packets
   tick
 end
 
@@ -87,49 +111,118 @@ to update-nodes
         set generation-table remove-item index generation-table
       ]
     ]
+
+    ifelse (connection_1 and node source_node_1 = self)
+    [
+      if target-dest != node dest_node_1
+      [
+        set target-dest node dest_node_1
+        set next-send-time ticks
+        set messages-in-a-row 0
+      ]
+    ]
+    [
+      ifelse (connection_2 and node source_node_2 = self)
+      [
+        if target-dest != node dest_node_2
+        [
+          set target-dest node dest_node_2
+          set next-send-time ticks
+          set messages-in-a-row 0
+        ]
+      ]
+      [set target-dest nobody]
+    ]
+
+
+    ;; if you have a target and enough time passed, send him something
+    if (not (target-dest = nobody)) and next-send-time = ticks
+    [
+      let way get-way-for-target-node target-dest
+      ifelse way = nobody
+      [
+        send-forward-ant
+        set next-send-time next-send-time + 5 * packet-interval
+      ]
+      [
+        ifelse messages-in-a-row < ant-every-n-packets
+        [
+          send-data-packet
+          set messages-in-a-row messages-in-a-row + 1
+        ]
+        [
+          send-forward-ant
+          set messages-in-a-row 0
+        ]
+
+        set next-send-time next-send-time + packet-interval
+
+      ]
+
+
+    ]
+  ]
+end
+
+
+to send-data-packet
+  ;; to be executed by a node
+  let source self
+  let target target-dest
+  let nextnode get-way-for-target-node target
+
+  hatch-packets 1[
+    set color [color] of source
+    set shape "circle 2"
+    set size 2
+    set target-node target
+    set owner-node source
+    set next nextnode
+    set previous source
+    set waiting? false
   ]
 
 end
 
-to send-forward-ants
+to send-forward-ant
+  ;; to be executed by a node
+
   ;;check if we already have data for this target
-  let source node 0
-  let target node 10
+  let source self
+  let target target-dest
 
+  let nextnode get-way-for-target-node target
+  let g random 1000000
 
-  ask source[
-    let nextnode get-way-for-target-node target
-    let g random 1000000
+  let next-nodes []
+  ifelse nextnode = nobody
+  [
+    ;let neighbors-excluding-node filter [neighbor -> neighbor != sender and neighbor != ant-owner] link-neighbors
+    set next-nodes [self] of link-neighbors
+  ]
+  [set next-nodes lput nextnode next-nodes]
 
-    let next-nodes []
-    ifelse nextnode = nobody
-    [
-      ;let neighbors-excluding-node filter [neighbor -> neighbor != sender and neighbor != ant-owner] link-neighbors
-      set next-nodes [self] of link-neighbors
-    ]
-    [set next-nodes lput nextnode next-nodes]
-
-    foreach next-nodes [ id ->
-      ; Create a new ant for each link
-        hatch-ants 1[
-          set color pink
-          set shape "bug"
-          set size 3
-          set forward-ant? true
-          setxy [xcor] of source [ycor] of source
-          face id
-          set owner-node source
-          set previous source
-          set next id
-          set target-node target
-          set n-hops 0
-          set travel-time 0
-          set generation g
-          set time-to-target 0
-          set visited-nodes (list source)
-      ]
+  foreach next-nodes [ id ->
+    ; Create a new ant for each link
+      hatch-ants 1[
+        set color pink
+        set shape "bug"
+        set size 3
+        set forward-ant? true
+        setxy [xcor] of source [ycor] of source
+        face id
+        set owner-node source
+        set previous source
+        set next id
+        set target-node target
+        set n-hops 0
+        set travel-time 0
+        set generation g
+        set time-to-target 0
+        set visited-nodes (list source)
     ]
   ]
+
 end
 
 to-report get-way-for-target-node [target]
@@ -198,10 +291,60 @@ to update-ants
       ask next[new-ant-arrived-to-node a]
     ]
   ]
-
-
 end
 
+
+to update-packets
+  ask packets[
+    let this_packet self
+    if not waiting?
+    [
+      let nxt-node next
+      let a self
+      ask previous
+      [
+        if not link-neighbor? nxt-node
+        [ask a[die]]
+      ]
+
+      face next
+      let delta_s 50 * movement-speed
+      if distance next <= delta_s
+      [
+        set delta_s distance next
+      ]
+      forward delta_s
+
+      if (pxcor = [pxcor] of next) and (pycor = [pycor] of next)
+      [
+        ifelse next = target-node
+        [die]
+        [
+          ask next [new-packet-arrived-to-node this_packet]
+        ]
+      ]
+    ]
+  ]
+end
+
+to new-packet-arrived-to-node [p]
+  ;;to be executed by a node, when the packet p arrives at it.
+  let this_node self
+  let nextnode get-way-for-target-node [target-node] of p
+  ifelse nextnode = nobody
+  [
+    ask p [set waiting? true]
+    set buffered-packets lput p buffered-packets
+  ]
+  [
+    ask p
+    [
+      set next nextnode
+      set previous this_node
+    ]
+  ]
+
+end
 
 to new-ant-arrived-to-node [a]
   ;;to be executed by a node, when the ant a arrives at it.
@@ -310,6 +453,7 @@ to new-ant-arrived-to-node [a]
     stop
   ];;if it was a forward ant
 
+
   if not [forward-ant?] of a
   [
     ;;in this case, we are backward ants
@@ -365,6 +509,17 @@ to update-pheromone-table [a]
   ; if we are here, then this entry was not present in the table. Let's add it.
   let new-entry (list target nxt route-value)
   set pheromone-table lput new-entry pheromone-table
+
+  ;; finally, if we were buffering packtes for that destination, let's free them
+  foreach buffered-packets[ ? ->
+    if [target] of ? = target
+    [
+      ask ? [set waiting? false]
+      let index position ? buffered-packets
+      set buffered-packets remove-item index buffered-packets
+    ]
+  ]
+
 end
 
 
@@ -429,10 +584,10 @@ NIL
 1
 
 BUTTON
-54
-129
-117
-162
+257
+47
+320
+80
 NIL
 go\n
 T
@@ -446,10 +601,10 @@ NIL
 1
 
 SLIDER
-29
-241
-230
-274
+26
+191
+227
+224
 distance-threshold
 distance-threshold
 1
@@ -461,10 +616,10 @@ NIL
 HORIZONTAL
 
 BUTTON
-60
-99
-123
-132
+191
+47
+254
+80
 NIL
 go
 NIL
@@ -478,25 +633,25 @@ NIL
 1
 
 SLIDER
-337
-712
-509
-745
+231
+191
+403
+224
 packet-interval
 packet-interval
 1
 60
-20.0
+30.0
 1
 1
 NIL
 HORIZONTAL
 
 SLIDER
-30
-283
-354
-316
+27
+233
+351
+266
 movement-speed
 movement-speed
 0.01
@@ -507,33 +662,108 @@ movement-speed
 NIL
 HORIZONTAL
 
-BUTTON
-191
-122
-354
-155
-NIL
-send-forward-ants
-NIL
-1
-T
-OBSERVER
-NIL
-NIL
-NIL
-NIL
-1
-
 SWITCH
-360
-284
-511
-317
+354
+233
+505
+266
 net-evolution
 net-evolution
 1
 1
 -1000
+
+CHOOSER
+209
+402
+347
+447
+source_node_1
+source_node_1
+0 5 10
+2
+
+CHOOSER
+351
+402
+489
+447
+dest_node_1
+dest_node_1
+0 5 10
+1
+
+TEXTBOX
+53
+304
+191
+352
+Node 0: Red 
+20
+15.0
+1
+
+SWITCH
+49
+407
+203
+440
+connection_1
+connection_1
+0
+1
+-1000
+
+SWITCH
+49
+468
+203
+501
+connection_2
+connection_2
+0
+1
+-1000
+
+CHOOSER
+209
+463
+347
+508
+source_node_2
+source_node_2
+0 5 10
+1
+
+CHOOSER
+351
+463
+489
+508
+dest_node_2
+dest_node_2
+0 5 10
+0
+
+TEXTBOX
+52
+329
+202
+353
+Node 5: Cyan
+20
+85.0
+1
+
+TEXTBOX
+51
+353
+232
+386
+Node 10: Yellow
+20
+44.0
+1
 
 @#$#@#$#@
 ## WHAT IS IT?
