@@ -11,6 +11,8 @@ nodes-own [
   next-send-time
   messages-in-a-row
   buffered-packets
+
+  next-hello-mess ; how many ticks to wait before sending it?
 ]
 
 packets-own[
@@ -20,6 +22,8 @@ packets-own[
   previous
   message
   waiting?
+
+  hello-message?
 ]
 
 ants-own[
@@ -28,11 +32,13 @@ ants-own[
   next
   previous
   visited-nodes
+  proactive-ant?
   forward-ant?
   n-hops
   travel-time
   generation
   time-to-target
+  n_broadcasts ; useful just to proactive ants
 ]
 
 globals[
@@ -41,7 +47,10 @@ globals[
   ant-generation-memory
   t_hop ; param which represent the time to take one hop in unloaded conditions.
   gamma_factor ; param in [0,1] which represent how much the memory of pheromone table is static respect new data. 1 means that pheremone table doesnt update.
-  ant-every-n-packets ; after many data packets should we send a proactive ant?
+  ;ant-every-n-packets ; after many data packets should we send a proactive ant?
+  ;proactive-broadcast-prob ; probability of a proactive ant to be broadcasted by a node
+  max-proactive-ant-broadcasts ; the max number a proactive ant can be broadcasted
+  ;interval-hello-messages ; how often to send an hello message to the neighbors?
 ]
 
 
@@ -54,6 +63,7 @@ to setup
   set ant-generation-memory 1000
   set t_hop 3e-3
   set ant-every-n-packets 5
+  set max-proactive-ant-broadcasts 2
 
   setup-nodes
   reset-ticks
@@ -70,6 +80,7 @@ to setup-nodes
     set next-send-time 0
     set messages-in-a-row 0
     set buffered-packets []
+    set next-hello-mess random hello-mess-interval
   ]
   ask node 0 [
   set color red
@@ -96,6 +107,8 @@ end
 
 
 to update-nodes
+
+  ;;eventually, update the network
   if (net-evolution)
   [
     ask nodes [
@@ -103,6 +116,7 @@ to update-nodes
       fd movement-speed ; move forward
     ]
   ]
+
   ask nodes[
     foreach generation-table [ ? ->
       if item 4 ? < ticks - ant-generation-memory
@@ -112,6 +126,14 @@ to update-nodes
       ]
     ]
 
+    ifelse next-hello-mess = 0
+    [
+      set next-hello-mess hello-mess-interval
+      send-hello-message
+    ]
+    [set next-hello-mess next-hello-mess - 1]
+
+    ;;check if user chose to use this node as sender
     ifelse (connection_1 and node source_node_1 = self)
     [
       if target-dest != node dest_node_1
@@ -141,7 +163,7 @@ to update-nodes
       let way get-way-for-target-node target-dest
       ifelse way = nobody
       [
-        send-forward-ant
+        send-forward-ant false
         set next-send-time next-send-time + 5 * packet-interval
       ]
       [
@@ -151,7 +173,7 @@ to update-nodes
           set messages-in-a-row messages-in-a-row + 1
         ]
         [
-          send-forward-ant
+          send-forward-ant true
           set messages-in-a-row 0
         ]
 
@@ -164,6 +186,25 @@ to update-nodes
   ]
 end
 
+to send-hello-message
+  ;; to be executed by a node
+  let source self
+  let next-nodes [self] of link-neighbors
+
+  foreach next-nodes [ id ->
+    hatch-packets 1[
+      set color [color] of source
+      set size 2
+      set target-node id
+      set owner-node source
+      set next id
+      set previous source
+      set waiting? false
+      set hello-message? true
+      set shape "square 2"
+    ]
+  ]
+end
 
 to send-data-packet
   ;; to be executed by a node
@@ -173,18 +214,20 @@ to send-data-packet
 
   hatch-packets 1[
     set color [color] of source
-    set shape "circle 2"
+
     set size 2
     set target-node target
     set owner-node source
     set next nextnode
     set previous source
     set waiting? false
+    set hello-message? false
+    set shape "circle 2"
   ]
 
 end
 
-to send-forward-ant
+to send-forward-ant [is_proactive?]
   ;; to be executed by a node
 
   ;;check if we already have data for this target
@@ -195,32 +238,47 @@ to send-forward-ant
   let g random 1000000
 
   let next-nodes []
-  ifelse nextnode = nobody
+
+  let will_be_broadcasted? false
+  if is_proactive?
   [
+    let random-value random-float 1.0
+    if random-value <= proactive-broadcast-prob
+    [set will_be_broadcasted? true]
+  ]
+  ifelse (nextnode = nobody) or will_be_broadcasted?
+  [
+    set will_be_broadcasted? true
     ;let neighbors-excluding-node filter [neighbor -> neighbor != sender and neighbor != ant-owner] link-neighbors
     set next-nodes [self] of link-neighbors
   ]
   [set next-nodes lput nextnode next-nodes]
 
+
   foreach next-nodes [ id ->
     ; Create a new ant for each link
-      hatch-ants 1[
-        set color pink
-        set shape "bug"
-        set size 3
-        set forward-ant? true
-        setxy [xcor] of source [ycor] of source
-        face id
-        set owner-node source
-        set previous source
-        set next id
-        set target-node target
-        set n-hops 0
-        set travel-time 0
-        set generation g
-        set time-to-target 0
-        set visited-nodes (list source)
-    ]
+    hatch-ants 1[
+      set color pink
+      set shape "bug"
+      set size 3
+      set forward-ant? true
+      set proactive-ant? is_proactive?
+      setxy [xcor] of source [ycor] of source
+      face id
+      set owner-node source
+      set previous source
+      set next id
+      set target-node target
+      set n-hops 0
+      set travel-time 0
+      set generation g
+      set time-to-target 0
+      set visited-nodes (list source)
+
+      ifelse will_be_broadcasted?
+      [set n_broadcasts 1]
+      [set n_broadcasts 0]
+  ]
   ]
 
 end
@@ -377,7 +435,7 @@ to new-ant-arrived-to-node [a]
 
     let found 0
     foreach generation-table[ ? ->
-      if item 0 ? = g
+      if item 0 ? = g and found = 0
       [
         let best-h item 1 ?
         let best-tt item 2 ?
@@ -402,10 +460,9 @@ to new-ant-arrived-to-node [a]
         if (h > best-h * alpha or tt > best-tt * alpha)
         [
           ask a[die]
+          stop
         ]
         set found 1
-        stop
-
     ]]
     if found = 0
     [
@@ -421,33 +478,51 @@ to new-ant-arrived-to-node [a]
     let sender [previous] of a
     let next-nodes []
 
-    ifelse nextnode = nobody
+    let will_be_broadcasted? false
+    if [proactive-ant?] of a
     [
+      let random-value random-float 1.0
+      if random-value <= proactive-broadcast-prob
+      [set will_be_broadcasted? true]
+    ]
+    ifelse (nextnode = nobody) or will_be_broadcasted?
+    [
+      set will_be_broadcasted? true
       ;let neighbors-excluding-node filter [neighbor -> neighbor != sender and neighbor != ant-owner] link-neighbors
       set next-nodes [self] of link-neighbors with [self != sender and self != ant-owner]
     ]
     [set next-nodes lput nextnode next-nodes]
 
-    foreach next-nodes[ id ->
-      hatch-ants 1[
-        set color [color] of a
-        set shape [shape] of a
-        set size [size] of a
-        set forward-ant? [forward-ant?] of a
-        setxy [xcor] of a [ycor] of a
-        set owner-node [owner-node] of a
-        set target-node [target-node] of a
-        set travel-time [travel-time] of a
-        set generation [generation] of a
+    if (not will_be_broadcasted?) or ([n_broadcasts] of a <= max-proactive-ant-broadcasts)
+    [
+      foreach next-nodes[ id ->
+        hatch-ants 1[
+          set color [color] of a
+          set shape [shape] of a
+          set size [size] of a
+          set forward-ant? [forward-ant?] of a
+          setxy [xcor] of a [ycor] of a
+          set owner-node [owner-node] of a
+          set target-node [target-node] of a
+          set travel-time [travel-time] of a
+          set generation [generation] of a
 
-        set n-hops [n-hops] of a + 1
-        set previous [next] of a
-        set visited-nodes [visited-nodes] of a
-        ;;set visited-nodes lput [next] of a visited-nodes  THIS property was set earlier
-        set next id
-        face next
+          set n-hops [n-hops] of a + 1
+          set previous [next] of a
+          set visited-nodes [visited-nodes] of a
+          ;;set visited-nodes lput [next] of a visited-nodes  THIS property was set earlier
+          set next id
+          face next
+
+          set proactive-ant? [proactive-ant?] of a
+
+          let old_val [n_broadcasts] of a
+          ifelse will_be_broadcasted?
+          [set n_broadcasts old_val + 1]
+          [set n_broadcasts old_val]
+        ]
+
       ]
-
     ]
     ask a[die] ;; the old ant is killed, after being cloned.
     stop
@@ -540,9 +615,9 @@ to update-links
 end
 @#$#@#$#@
 GRAPHICS-WINDOW
-554
+702
 10
-1168
+1316
 625
 -1
 -1
@@ -601,14 +676,14 @@ NIL
 1
 
 SLIDER
-26
-191
-227
-224
+54
+149
+231
+182
 distance-threshold
 distance-threshold
 1
-100
+75
 27.0
 1
 1
@@ -633,10 +708,10 @@ NIL
 1
 
 SLIDER
-231
-191
-403
-224
+237
+149
+415
+182
 packet-interval
 packet-interval
 1
@@ -648,10 +723,10 @@ NIL
 HORIZONTAL
 
 SLIDER
-27
-233
-351
-266
+55
+188
+231
+221
 movement-speed
 movement-speed
 0.01
@@ -663,10 +738,10 @@ NIL
 HORIZONTAL
 
 SWITCH
-354
-233
-505
-266
+54
+226
+231
+259
 net-evolution
 net-evolution
 1
@@ -674,40 +749,40 @@ net-evolution
 -1000
 
 CHOOSER
-209
-402
-347
-447
+211
+449
+349
+494
 source_node_1
 source_node_1
 0 5 10
 2
 
 CHOOSER
-351
-402
-489
-447
+353
+449
+491
+494
 dest_node_1
 dest_node_1
 0 5 10
-1
+0
 
 TEXTBOX
-53
-304
-191
-352
+55
+351
+193
+399
 Node 0: Red 
 20
 15.0
 1
 
 SWITCH
-49
-407
-203
-440
+51
+454
+205
+487
 connection_1
 connection_1
 0
@@ -715,55 +790,100 @@ connection_1
 -1000
 
 SWITCH
-49
-468
-203
-501
+51
+515
+205
+548
 connection_2
 connection_2
-0
+1
 1
 -1000
 
 CHOOSER
-209
-463
-347
-508
+211
+510
+349
+555
 source_node_2
 source_node_2
-0 5 10
-1
-
-CHOOSER
-351
-463
-489
-508
-dest_node_2
-dest_node_2
 0 5 10
 0
 
-TEXTBOX
-52
-329
-202
+CHOOSER
 353
+510
+491
+555
+dest_node_2
+dest_node_2
+0 5 10
+1
+
+TEXTBOX
+54
+376
+204
+400
 Node 5: Cyan
 20
 85.0
 1
 
 TEXTBOX
-51
-353
-232
-386
+53
+400
+234
+433
 Node 10: Yellow
 20
 44.0
 1
+
+SLIDER
+236
+188
+416
+221
+hello-mess-interval
+hello-mess-interval
+50
+150
+50.0
+10
+1
+NIL
+HORIZONTAL
+
+SLIDER
+422
+149
+646
+182
+proactive-broadcast-prob
+proactive-broadcast-prob
+0
+1
+0.1
+0.1
+1
+NIL
+HORIZONTAL
+
+SLIDER
+235
+226
+416
+259
+ant-every-n-packets
+ant-every-n-packets
+1
+10
+5.0
+1
+1
+NIL
+HORIZONTAL
 
 @#$#@#$#@
 ## WHAT IS IT?
