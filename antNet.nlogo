@@ -6,6 +6,8 @@ nodes-own [
   pheromone-table ;; list where each entry is a list in form [t n v], where t is the target node, n is a linked node and v is a value about the goodness of going to t through n.
   generation-table ;;list where each entry is a list in form [g h tt fh ts], where g is the ant generation, h is the number of hops of the best ant, tt is its travel time, fh its first hop and ts is the timestamp about when the entry eas accessed last time
 
+  neighbors-table ;; list where each entry is a list in form [n, t], where n is a active node directly connected to this one, while t is the timer after which, withouth any package received from there, the connection is deleted.
+
   ;; the following are just for sake of simulation
   target-dest
   next-send-time
@@ -24,6 +26,8 @@ packets-own[
   waiting?
 
   hello-message?
+  link-failure-message?
+  lost-best-connection-to ; just for link-failure-messages.
 ]
 
 ants-own[
@@ -51,8 +55,14 @@ globals[
   ;proactive-broadcast-prob ; probability of a proactive ant to be broadcasted by a node
   max-proactive-ant-broadcasts ; the max number a proactive ant can be broadcasted
   ;interval-hello-messages ; how often to send an hello message to the neighbors?
+
+  max-hello-messages-missed
 ]
 
+
+; ---------------------------------------
+; ------ START SETUP FUNCTIONS ----------
+; ---------------------------------------
 
 to setup
   clear-all
@@ -64,6 +74,7 @@ to setup
   set t_hop 3e-3
   set ant-every-n-packets 5
   set max-proactive-ant-broadcasts 2
+  set max-hello-messages-missed 2
 
   setup-nodes
   reset-ticks
@@ -80,7 +91,9 @@ to setup-nodes
     set next-send-time 0
     set messages-in-a-row 0
     set buffered-packets []
+    set neighbors-table []
     set next-hello-mess random hello-mess-interval
+
   ]
   ask node 0 [
   set color red
@@ -95,6 +108,17 @@ to setup-nodes
   ]
 end
 
+; -------------------------------------
+; ------ END SETUP FUNCTIONS ----------
+; -------------------------------------
+
+
+
+
+
+; ----------------------------------------
+; ------ START UPDATE FUNCTIONS ----------
+; ----------------------------------------
 
 to go
   update-nodes
@@ -103,8 +127,6 @@ to go
   update-packets
   tick
 end
-
-
 
 to update-nodes
 
@@ -126,10 +148,60 @@ to update-nodes
       ]
     ]
 
+    ;let's see if we have to delete some old neighbour form our list
+    foreach neighbors-table[ ? ->
+      let index position ? neighbors-table
+      ifelse item 1 ? = 0
+      [
+        ;; delete this unconnected node
+
+        let new-entry (list item 0 ? (hello-mess-interval * max-hello-messages-missed))
+        set neighbors-table remove-item index neighbors-table
+
+        let lost_node item 0 ?
+        let losses (list lost_node)
+
+        let indices_to_be_deleted []
+
+        foreach pheromone-table[connection ->
+
+          if item 1 connection = lost_node
+          [
+            let idx position connection pheromone-table
+            let conn_value item 2 connection
+
+            ;;check if it was the best option
+            let best-option? true
+            foreach pheromone-table [other_connection ->
+              if item 1 other_connection != item 1 connection and item 0 other_connection = item 0 connection and item 2 other_connection >= item 2 connection
+              [set best-option? false]
+            ]
+            if best-option?
+            [
+              set losses lput item 0 connection losses
+            ]
+
+            set indices_to_be_deleted fput idx indices_to_be_deleted
+          ]
+        ]
+
+        foreach indices_to_be_deleted [ idx ->
+          set pheromone-table remove-item idx pheromone-table
+        ]
+
+        ; tell every neighobor we lost this node.
+        send-link-failure-messages losses self
+      ]
+      [
+        let new-entry (list item 0 ? (item 1 ? - 1))
+        set neighbors-table replace-item index neighbors-table new-entry
+      ]
+    ]
+
     ifelse next-hello-mess = 0
     [
       set next-hello-mess hello-mess-interval
-      send-hello-message
+      send-hello-messages
     ]
     [set next-hello-mess next-hello-mess - 1]
 
@@ -186,107 +258,104 @@ to update-nodes
   ]
 end
 
-to send-hello-message
-  ;; to be executed by a node
-  let source self
-  let next-nodes [self] of link-neighbors
+to update-ants
+  ask ants[
+    let nxt-node next
+    let a self
+    ask previous
+    [
+      if not link-neighbor? nxt-node
+      [ask a[die]]
+    ]
+    set travel-time travel-time + 1
+    if not forward-ant?
+    [set time-to-target time-to-target + 1]
 
-  foreach next-nodes [ id ->
-    hatch-packets 1[
-      set color [color] of source
-      set size 2
-      set target-node id
-      set owner-node source
-      set next id
-      set previous source
-      set waiting? false
-      set hello-message? true
-      set shape "square 2"
+    face next
+    let delta_s 50 * movement-speed
+    if distance next <= delta_s
+    [
+      set delta_s distance next
+    ]
+    forward delta_s
+
+    if (pxcor = [pxcor] of next) and (pycor = [pycor] of next)
+    [
+      ask next[new-ant-arrived-to-node a]
     ]
   ]
 end
 
-to send-data-packet
-  ;; to be executed by a node
-  let source self
-  let target target-dest
-  let nextnode get-way-for-target-node target
+to update-packets
+  ask packets[
+    let this_packet self
+    if not waiting?
+    [
+      let nxt-node next
+      let a self
+      ask previous
+      [
+        if not link-neighbor? nxt-node
+        [ask a[die]]
+      ]
 
-  hatch-packets 1[
-    set color [color] of source
+      face next
+      let delta_s 50 * movement-speed
+      if distance next <= delta_s
+      [
+        set delta_s distance next
+      ]
+      forward delta_s
 
-    set size 2
-    set target-node target
-    set owner-node source
-    set next nextnode
-    set previous source
-    set waiting? false
-    set hello-message? false
-    set shape "circle 2"
+      if (pxcor = [pxcor] of next) and (pycor = [pycor] of next)
+      [
+        ask next [new-packet-arrived-to-node this_packet]
+      ]
+    ]
   ]
-
 end
 
-to send-forward-ant [is_proactive?]
-  ;; to be executed by a node
+to update-links
+  ask nodes [
+    ; Check other turtles and create a link if it doesn't already exist and they are within the distance threshold
+    ask other nodes [
+      if not link-neighbor? myself and distance myself <= distance-threshold
+      [
+        create-link-with myself
+      ]
+    ]
 
-  ;;check if we already have data for this target
-  let source self
-  let target target-dest
-
-  let nextnode get-way-for-target-node target
-  let g random 1000000
-
-  let next-nodes []
-
-  let will_be_broadcasted? false
-  if is_proactive?
-  [
-    let random-value random-float 1.0
-    if random-value <= proactive-broadcast-prob
-    [set will_be_broadcasted? true]
+    ask links[
+      if link-length > distance-threshold [die]
+    ]
   ]
-  ifelse (nextnode = nobody) or will_be_broadcasted?
-  [
-    set will_be_broadcasted? true
-    ;let neighbors-excluding-node filter [neighbor -> neighbor != sender and neighbor != ant-owner] link-neighbors
-    set next-nodes [self] of link-neighbors
-  ]
-  [set next-nodes lput nextnode next-nodes]
-
-
-  foreach next-nodes [ id ->
-    ; Create a new ant for each link
-    hatch-ants 1[
-      set color pink
-      set shape "bug"
-      set size 3
-      set forward-ant? true
-      set proactive-ant? is_proactive?
-      setxy [xcor] of source [ycor] of source
-      face id
-      set owner-node source
-      set previous source
-      set next id
-      set target-node target
-      set n-hops 0
-      set travel-time 0
-      set generation g
-      set time-to-target 0
-      set visited-nodes (list source)
-
-      ifelse will_be_broadcasted?
-      [set n_broadcasts 1]
-      [set n_broadcasts 0]
-  ]
-  ]
-
 end
+
+; ---------------------------------------
+; ------ STOP UPDATE FUNCTIONS ----------
+; ---------------------------------------
+
+
+
+
+
+; -----------------------------------------
+; ------ START ROUTING FUNCTIONS ----------
+; -----------------------------------------
 
 to-report get-way-for-target-node [target]
   ;; To be executed by a node when it asks itslef which way to take in order to reach the node "target".
   ;; if the return value is nobody, then the "query-node" has no clue. Otherwise, the returned value is the next node to ask for, closer to target.
 
+
+  ; first, let's check if we have this node in our neighbours list
+  foreach neighbors-table[ ? ->
+    if item 0 ? = target
+    [
+      ;then, we know we are directly connected to this node
+      report target
+    ]
+  ]
 
   let nodes-list []
   let goodness-list []
@@ -322,72 +391,195 @@ to-report sample-element [n p] ;it returns one of the possibility stochastichall
   ]
 end
 
+to update-pheromone-table [a]
+  ;;to be invoked by a node, when it receives a backward ant
+  let this_node self
+  let target [target-node] of a
+  let nxt [previous] of a ;NOTE: it is previous 'cause we still didn't update the reference with the new one.
+  let t-time [time-to-target] of a
+  let hops length [visited-nodes] of a - position this_node [visited-nodes] of a - 1
 
-to update-ants
-  ask ants[
-    let nxt-node next
-    let a self
-    ask previous
+  ;; this value represents a measure about how good it is taking this route (so far) to go to target-node
+  let route-value 2 / (t-time + (hops * t_hop))
+
+  foreach pheromone-table [ ? ->
+    if item 0 ? = target and item 1 ? = nxt
     [
-      if not link-neighbor? nxt-node
-      [ask a[die]]
+      ;let's update this value
+      let old_value item 2 ?
+      let new-value gamma_factor * old_value + ((1 - gamma_factor) * route-value)
+
+      let index position ? pheromone-table
+      let new-entry (list target nxt new-value)
+
+      ;; let's update the entry with the updated data.
+      set pheromone-table replace-item index pheromone-table new-entry
+      stop
     ]
-    set travel-time travel-time + 1
-    if not forward-ant?
-    [set time-to-target time-to-target + 1]
+  ]
 
-    face next
-    let delta_s 50 * movement-speed
-    if distance next <= delta_s
+  ; if we are here, then this entry was not present in the table. Let's add it.
+  let new-entry (list target nxt route-value)
+  set pheromone-table lput new-entry pheromone-table
+
+  ;; finally, if we were buffering packtes for that destination, let's free them
+  foreach buffered-packets[ ? ->
+    if [target] of ? = target
     [
-      set delta_s distance next
+      ask ? [set waiting? false]
+      let index position ? buffered-packets
+      set buffered-packets remove-item index buffered-packets
     ]
-    forward delta_s
+  ]
 
-    if (pxcor = [pxcor] of next) and (pycor = [pycor] of next)
-    [
-      ask next[new-ant-arrived-to-node a]
+end
+
+; ----------------------------------------
+; ------ STOP ROUTING FUNCTIONS ----------
+; ----------------------------------------
+
+
+
+
+
+
+; ----------------------------------------
+; ------ START PACKET FUNCTIONS ----------
+; ----------------------------------------
+
+to send-hello-messages
+  ;; to be executed by a node
+  let source self
+  let next-nodes [self] of link-neighbors
+
+  foreach next-nodes [ id ->
+    hatch-packets 1[
+      set color [color] of source
+      set size 2
+      set target-node id
+      set owner-node source
+      set next id
+      set previous source
+      set waiting? false
+      set hello-message? true
+      set link-failure-message? false
+      set shape "square 2"
     ]
   ]
 end
 
+to send-data-packet
+  ;; to be executed by a node
+  let source self
+  let target target-dest
+  let nextnode get-way-for-target-node target
 
-to update-packets
-  ask packets[
-    let this_packet self
-    if not waiting?
-    [
-      let nxt-node next
-      let a self
-      ask previous
-      [
-        if not link-neighbor? nxt-node
-        [ask a[die]]
-      ]
+  hatch-packets 1[
+    set color [color] of source
 
-      face next
-      let delta_s 50 * movement-speed
-      if distance next <= delta_s
-      [
-        set delta_s distance next
-      ]
-      forward delta_s
-
-      if (pxcor = [pxcor] of next) and (pycor = [pycor] of next)
-      [
-        ifelse next = target-node
-        [die]
-        [
-          ask next [new-packet-arrived-to-node this_packet]
-        ]
-      ]
-    ]
+    set size 2
+    set target-node target
+    set owner-node source
+    set next nextnode
+    set previous source
+    set waiting? false
+    set hello-message? false
+    set link-failure-message? false
+    set shape "circle 2"
   ]
+
 end
 
 to new-packet-arrived-to-node [p]
   ;;to be executed by a node, when the packet p arrives at it.
   let this_node self
+  let target [target-node] of p
+  let sender [previous] of p
+
+
+  ; so, let's update our routing table, since we know we are connected to the previous node of this packet
+  let found? false
+  foreach neighbors-table [ ? ->
+    if item 0 ? = sender
+    [
+      set found? true
+      let index position ? neighbors-table
+      let new-entry (list sender (hello-mess-interval * max-hello-messages-missed))
+      set neighbors-table replace-item index neighbors-table new-entry
+    ]
+  ]
+  if not found?
+  [
+    ; then, let's add this connection
+    let new-entry (list sender (hello-mess-interval * max-hello-messages-missed))
+    set neighbors-table lput new-entry neighbors-table
+  ]
+
+  ; what to do if the received message was a notification about a lost connection?
+  if [link-failure-message?] of p
+  [
+    let losses []
+
+    foreach [lost-best-connection-to] of p[ lost_node ->
+
+
+      set found? false
+      foreach neighbors-table [ ? ->
+        if item 0 ? = lost_node [set found? true]
+      ]
+      ; if we are directly connected to this node, then no problem.
+      if not found?
+      [
+        let best-connector nobody
+        let best-connection-value 0
+        let index -1
+        ; let's check if who sent us this message was our best connection to that node
+        foreach pheromone-table [ ? ->
+          if item 0 ? = lost_node
+          [
+            ; if we find the entry, we need to remove it
+            if item 1 ? = sender
+            [
+              set index position ? pheromone-table
+            ]
+
+            ; let's check if it was our best connection (so far)
+            if item 2 ? > best-connection-value
+            [
+              set best-connector item 1 ?
+              set best-connection-value item 2 ?
+            ]
+          ]
+        ]
+
+        if index >= 0
+        [set pheromone-table remove-item index pheromone-table]
+
+        if best-connector = sender
+        [
+          ; then we need to inform our neighbours about the lost connection.
+          set losses lput lost_node losses
+        ]
+
+      ]
+    ]
+
+    if length losses > 0
+    [send-link-failure-messages losses ([owner-node] of p)]
+
+  ]
+
+
+
+  if target = this_node
+  [
+    ; we are done.
+    ask p [die]
+    stop
+  ]
+
+
+  ; if we are here, then the received message was a standard message for somebody else. Let's try to send it to him.
   let nextnode get-way-for-target-node [target-node] of p
   ifelse nextnode = nobody
   [
@@ -400,6 +592,99 @@ to new-packet-arrived-to-node [p]
       set next nextnode
       set previous this_node
     ]
+  ]
+
+end
+
+to send-link-failure-messages [lost_nodes warner]
+  ;; to be invoked by a node, when it loose its best connection to items in 'lost-nodes' and wants to inform neighbours about it. 'warner' is the first node which lost connection.
+  ;; lost_nodes is a list
+
+  let source self
+  let next-nodes [self] of link-neighbors with [self != warner]
+
+  foreach next-nodes [ id ->
+    hatch-packets 1[
+      set color [color] of warner
+      set size 2
+      set target-node id
+      set owner-node warner
+      set next id
+      set previous source
+      set waiting? false
+      set hello-message? false
+
+      set link-failure-message? true
+      set lost-best-connection-to lost_nodes
+      set shape "x"
+    ]
+  ]
+end
+
+; ---------------------------------------
+; ------ STOP PACKET FUNCTIONS ----------
+; ---------------------------------------
+
+
+
+
+
+
+; -------------------------------------
+; ------ START ANT FUNCTIONS ----------
+; -------------------------------------
+
+to send-forward-ant [is_proactive?]
+  ;; to be executed by a node
+
+  ;;check if we already have data for this target
+  let source self
+  let target target-dest
+
+  let nextnode get-way-for-target-node target
+  let g random 1000000
+
+  let next-nodes []
+
+  let will_be_broadcasted? false
+  if is_proactive?
+  [
+    let random-value random-float 1.0
+    if random-value <= proactive-broadcast-prob
+    [set will_be_broadcasted? true]
+  ]
+  ifelse (nextnode = nobody) or will_be_broadcasted?
+  [
+    set will_be_broadcasted? true
+    set next-nodes [self] of link-neighbors
+  ]
+  [set next-nodes lput nextnode next-nodes]
+
+
+  foreach next-nodes [ id ->
+    ; Create a new ant for each link
+    hatch-ants 1[
+      set color pink
+      set shape "bug"
+      set size 3
+      set forward-ant? true
+      set proactive-ant? is_proactive?
+      setxy [xcor] of source [ycor] of source
+      face id
+      set owner-node source
+      set previous source
+      set next id
+      set target-node target
+      set n-hops 0
+      set travel-time 0
+      set generation g
+      set time-to-target 0
+      set visited-nodes (list source)
+
+      ifelse will_be_broadcasted?
+      [set n_broadcasts 1]
+      [set n_broadcasts 0]
+  ]
   ]
 
 end
@@ -488,7 +773,6 @@ to new-ant-arrived-to-node [a]
     ifelse (nextnode = nobody) or will_be_broadcasted?
     [
       set will_be_broadcasted? true
-      ;let neighbors-excluding-node filter [neighbor -> neighbor != sender and neighbor != ant-owner] link-neighbors
       set next-nodes [self] of link-neighbors with [self != sender and self != ant-owner]
     ]
     [set next-nodes lput nextnode next-nodes]
@@ -554,65 +838,9 @@ to new-ant-arrived-to-node [a]
 
 end
 
-to update-pheromone-table [a]
-  ;;to be invoked by a node, when it receives a backward ant
-  let this_node self
-  let target [target-node] of a
-  let nxt [previous] of a ;NOTE: it is previous 'cause we still didn't update the reference with the new one.
-  let t-time [time-to-target] of a
-  let hops length [visited-nodes] of a - position this_node [visited-nodes] of a - 1
-
-  ;; this value represents a measure about how good it is taking this route (so far) to go to target-node
-  let route-value 2 / (t-time + (hops * t_hop))
-
-  foreach pheromone-table [ ? ->
-    if item 0 ? = target and item 1 ? = nxt
-    [
-      ;let's update this value
-      let old_value item 2 ?
-      let new-value gamma_factor * old_value + ((1 - gamma_factor) * route-value)
-
-      let index position ? pheromone-table
-      let new-entry (list target nxt new-value)
-
-      ;; let's update the entry with the updated data.
-      set pheromone-table replace-item index pheromone-table new-entry
-      stop
-    ]
-  ]
-
-  ; if we are here, then this entry was not present in the table. Let's add it.
-  let new-entry (list target nxt route-value)
-  set pheromone-table lput new-entry pheromone-table
-
-  ;; finally, if we were buffering packtes for that destination, let's free them
-  foreach buffered-packets[ ? ->
-    if [target] of ? = target
-    [
-      ask ? [set waiting? false]
-      let index position ? buffered-packets
-      set buffered-packets remove-item index buffered-packets
-    ]
-  ]
-
-end
-
-
-to update-links
-  ask nodes [
-    ; Check other turtles and create a link if it doesn't already exist and they are within the distance threshold
-    ask other nodes [
-      if not link-neighbor? myself and distance myself <= distance-threshold
-      [
-        create-link-with myself
-      ]
-    ]
-
-    ask links[
-      if link-length > distance-threshold [die]
-    ]
-  ]
-end
+; ------------------------------------
+; ------ STOP ANT FUNCTIONS ----------
+; ------------------------------------
 @#$#@#$#@
 GRAPHICS-WINDOW
 702
@@ -744,7 +972,7 @@ SWITCH
 259
 net-evolution
 net-evolution
-1
+0
 1
 -1000
 
@@ -756,7 +984,7 @@ CHOOSER
 source_node_1
 source_node_1
 0 5 10
-2
+0
 
 CHOOSER
 353
@@ -766,7 +994,7 @@ CHOOSER
 dest_node_1
 dest_node_1
 0 5 10
-0
+1
 
 TEXTBOX
 55
@@ -796,7 +1024,7 @@ SWITCH
 548
 connection_2
 connection_2
-1
+0
 1
 -1000
 
@@ -808,7 +1036,7 @@ CHOOSER
 source_node_2
 source_node_2
 0 5 10
-0
+1
 
 CHOOSER
 353
@@ -818,7 +1046,7 @@ CHOOSER
 dest_node_2
 dest_node_2
 0 5 10
-1
+2
 
 TEXTBOX
 54
