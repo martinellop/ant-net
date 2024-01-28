@@ -6,3 +6,7 @@ This project is part of the exam for the course "Distributed Artificial Intellig
 <p align="center">
 <img src="screen_01.png" />
 </p>
+
+<p align="center">
+<img src="demo.gif" />
+</p>
