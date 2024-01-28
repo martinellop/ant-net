@@ -23,7 +23,9 @@ packets-own[
   next
   previous
   message
+  travel-time
   waiting?
+  waiting-time
 
   hello-message?
   link-failure-message?
@@ -51,12 +53,16 @@ globals[
   ant-generation-memory
   t_hop ; param which represent the time to take one hop in unloaded conditions.
   gamma_factor ; param in [0,1] which represent how much the memory of pheromone table is static respect new data. 1 means that pheremone table doesnt update.
-  ;ant-every-n-packets ; after many data packets should we send a proactive ant?
-  ;proactive-broadcast-prob ; probability of a proactive ant to be broadcasted by a node
   max-proactive-ant-broadcasts ; the max number a proactive ant can be broadcasted
-  ;interval-hello-messages ; how often to send an hello message to the neighbors?
+
 
   max-hello-messages-missed
+  max-waiting-time-packets ;; a packet which is stuck in a node without path to target will be dropped after this time.
+
+  data-speed-multiplier
+
+  conn-1-travel-time
+  conn-2-travel-time
 ]
 
 
@@ -68,20 +74,26 @@ to setup
   clear-all
 
   ;;;;;; setup of global variables
-  set alpha_1_factor 0.9
-  set alpha_2_factor 2.0
-  set ant-generation-memory 1000
+  set alpha_1_factor 0.6
+  set alpha_2_factor 1.2 ;2.0
+  set ant-generation-memory 3000
   set t_hop 3e-3
-  set ant-every-n-packets 5
   set max-proactive-ant-broadcasts 2
   set max-hello-messages-missed 2
+  set max-waiting-time-packets 100
+
+  set data-speed-multiplier 200
+
+  set conn-1-travel-time 0
+  set conn-2-travel-time 0
 
   setup-nodes
+  update-links
   reset-ticks
 end
 
 to setup-nodes
-  create-nodes 20 [
+  create-nodes 25 [
     setxy random-xcor random-ycor
     set color blue
     set size 5
@@ -93,6 +105,7 @@ to setup-nodes
     set buffered-packets []
     set neighbors-table []
     set next-hello-mess random hello-mess-interval
+    set next-send-time 1
 
   ]
   ask node 0 [
@@ -232,11 +245,11 @@ to update-nodes
     ;; if you have a target and enough time passed, send him something
     if (not (target-dest = nobody)) and next-send-time = ticks
     [
-      let way get-way-for-target-node target-dest
+      let way get-way-for-target-node target-dest false
       ifelse way = nobody
       [
         send-forward-ant false
-        set next-send-time next-send-time + 5 * packet-interval
+        set next-send-time next-send-time + ant-every-n-packets * packet-interval
       ]
       [
         ifelse messages-in-a-row < ant-every-n-packets
@@ -252,8 +265,20 @@ to update-nodes
         set next-send-time next-send-time + packet-interval
 
       ]
+    ]
 
 
+    foreach buffered-packets[ ? ->
+      ifelse [waiting-time] of ? < max-waiting-time-packets
+      [
+        ask ?
+        [set waiting-time waiting-time + 1]
+      ]
+      [
+        let index position ? buffered-packets
+        set buffered-packets remove-item index buffered-packets
+        terminate-packet ? False
+      ]
     ]
   ]
 end
@@ -272,7 +297,7 @@ to update-ants
     [set time-to-target time-to-target + 1]
 
     face next
-    let delta_s 50 * movement-speed
+    let delta_s data-speed-multiplier * movement-speed
     if distance next <= delta_s
     [
       set delta_s distance next
@@ -289,18 +314,22 @@ end
 to update-packets
   ask packets[
     let this_packet self
+
+    if not hello-message? and not link-failure-message?
+    [set travel-time travel-time + 1]
+
     if not waiting?
     [
       let nxt-node next
-      let a self
+      let p self
       ask previous
       [
         if not link-neighbor? nxt-node
-        [ask a[die]]
+        [terminate-packet p False]
       ]
 
       face next
-      let delta_s 50 * movement-speed
+      let delta_s data-speed-multiplier * movement-speed
       if distance next <= delta_s
       [
         set delta_s distance next
@@ -343,7 +372,7 @@ end
 ; ------ START ROUTING FUNCTIONS ----------
 ; -----------------------------------------
 
-to-report get-way-for-target-node [target]
+to-report get-way-for-target-node [target use-best?]
   ;; To be executed by a node when it asks itslef which way to take in order to reach the node "target".
   ;; if the return value is nobody, then the "query-node" has no clue. Otherwise, the returned value is the next node to ask for, closer to target.
 
@@ -371,7 +400,13 @@ to-report get-way-for-target-node [target]
 
   if length nodes-list = 0 [report nobody] ;if we are here, we have no clue about how to reach the target node
 
-  report sample-element nodes-list goodness-list
+  ifelse use-best?
+  [
+    let best_val max goodness-list
+    let index position best_val goodness-list
+    report item index nodes-list
+  ]
+  [ report sample-element nodes-list goodness-list ]
 end
 
 to-report sample-element [n p] ;it returns one of the possibility stochastichally, based on input weights for each possibility
@@ -472,7 +507,7 @@ to send-data-packet
   ;; to be executed by a node
   let source self
   let target target-dest
-  let nextnode get-way-for-target-node target
+  let nextnode get-way-for-target-node target true
 
   hatch-packets 1[
     set color [color] of source
@@ -485,6 +520,7 @@ to send-data-packet
     set waiting? false
     set hello-message? false
     set link-failure-message? false
+    set travel-time 0
     set shape "circle 2"
   ]
 
@@ -574,16 +610,17 @@ to new-packet-arrived-to-node [p]
   if target = this_node
   [
     ; we are done.
-    ask p [die]
+    terminate-packet p True
     stop
   ]
 
 
   ; if we are here, then the received message was a standard message for somebody else. Let's try to send it to him.
-  let nextnode get-way-for-target-node [target-node] of p
+  let nextnode get-way-for-target-node [target-node] of p true
   ifelse nextnode = nobody
   [
     ask p [set waiting? true]
+    ask p [set waiting-time 0]
     set buffered-packets lput p buffered-packets
   ]
   [
@@ -621,6 +658,29 @@ to send-link-failure-messages [lost_nodes warner]
   ]
 end
 
+
+to terminate-packet [p success?]
+  ;; p is a packet which has to be killed, while success? points if the packet successfully arrived to target
+  ask p[
+
+   if not hello-message? and not link-failure-message?
+    [
+      let val 0
+      if success? [set val travel-time]
+
+      if target-node = node dest_node_1 and owner-node = node source_node_1
+      [set conn-1-travel-time val]
+
+      if target-node = node dest_node_2 and owner-node = node source_node_2
+      [set conn-2-travel-time val]
+    ]
+
+   die
+   stop
+  ]
+
+end
+
 ; ---------------------------------------
 ; ------ STOP PACKET FUNCTIONS ----------
 ; ---------------------------------------
@@ -641,7 +701,7 @@ to send-forward-ant [is_proactive?]
   let source self
   let target target-dest
 
-  let nextnode get-way-for-target-node target
+  let nextnode get-way-for-target-node target false
   let g random 1000000
 
   let next-nodes []
@@ -650,7 +710,7 @@ to send-forward-ant [is_proactive?]
   if is_proactive?
   [
     let random-value random-float 1.0
-    if random-value <= proactive-broadcast-prob
+    if random-value <= (proactive-broadcast-prob / 100.0)
     [set will_be_broadcasted? true]
   ]
   ifelse (nextnode = nobody) or will_be_broadcasted?
@@ -758,7 +818,7 @@ to new-ant-arrived-to-node [a]
     ;now, let's make the ant forward. We do it by cloning the previous ant as many times as needed, and killing the previous one.
 
 
-    let nextnode get-way-for-target-node [target-node] of a
+    let nextnode get-way-for-target-node [target-node] of a false
     let ant-owner [owner-node] of a
     let sender [previous] of a
     let next-nodes []
@@ -767,7 +827,7 @@ to new-ant-arrived-to-node [a]
     if [proactive-ant?] of a
     [
       let random-value random-float 1.0
-      if random-value <= proactive-broadcast-prob
+      if random-value <= (proactive-broadcast-prob / 100.0)
       [set will_be_broadcasted? true]
     ]
     ifelse (nextnode = nobody) or will_be_broadcasted?
@@ -777,7 +837,7 @@ to new-ant-arrived-to-node [a]
     ]
     [set next-nodes lput nextnode next-nodes]
 
-    if (not will_be_broadcasted?) or ([n_broadcasts] of a <= max-proactive-ant-broadcasts)
+    if not [proactive-ant?] of a or [n_broadcasts] of a < max-proactive-ant-broadcasts
     [
       foreach next-nodes[ id ->
         hatch-ants 1[
@@ -843,10 +903,10 @@ end
 ; ------------------------------------
 @#$#@#$#@
 GRAPHICS-WINDOW
-702
-10
-1316
-625
+546
+12
+1280
+747
 -1
 -1
 6.0
@@ -859,10 +919,10 @@ GRAPHICS-WINDOW
 1
 1
 1
--50
-50
--50
-50
+-60
+60
+-60
+60
 0
 0
 1
@@ -870,10 +930,10 @@ ticks
 30.0
 
 BUTTON
-56
-47
-129
-80
+16
+22
+106
+55
 NIL
 setup
 NIL
@@ -887,10 +947,10 @@ NIL
 1
 
 BUTTON
-257
-47
-320
-80
+176
+22
+239
+55
 NIL
 go\n
 T
@@ -904,10 +964,10 @@ NIL
 1
 
 SLIDER
-54
-149
-231
-182
+17
+60
+239
+93
 distance-threshold
 distance-threshold
 1
@@ -919,10 +979,10 @@ NIL
 HORIZONTAL
 
 BUTTON
-191
-47
-254
-80
+110
+22
+173
+55
 NIL
 go
 NIL
@@ -936,40 +996,40 @@ NIL
 1
 
 SLIDER
-237
-149
-415
-182
+244
+61
+422
+94
 packet-interval
 packet-interval
-1
-60
-30.0
-1
+5
+100
+10.0
+5
 1
 NIL
 HORIZONTAL
 
 SLIDER
-55
-188
-231
-221
+17
+98
+238
+131
 movement-speed
 movement-speed
+0.001
 0.01
-0.1
-0.02
-0.01
+0.003
+0.001
 1
 NIL
 HORIZONTAL
 
 SWITCH
-54
-226
-231
-259
+245
+24
+422
+57
 net-evolution
 net-evolution
 0
@@ -977,40 +1037,40 @@ net-evolution
 -1000
 
 CHOOSER
-211
-449
-349
-494
+182
+505
+320
+550
 source_node_1
 source_node_1
 0 5 10
 0
 
 CHOOSER
-353
-449
-491
-494
+324
+505
+462
+550
 dest_node_1
 dest_node_1
 0 5 10
-1
+2
 
 TEXTBOX
-55
-351
-193
-399
+22
+387
+160
+435
 Node 0: Red 
 20
 15.0
 1
 
 SWITCH
-51
-454
-205
-487
+22
+510
+177
+543
 connection_1
 connection_1
 0
@@ -1018,10 +1078,10 @@ connection_1
 -1000
 
 SWITCH
-51
-515
-205
-548
+22
+571
+176
+604
 connection_2
 connection_2
 0
@@ -1029,89 +1089,164 @@ connection_2
 -1000
 
 CHOOSER
-211
-510
-349
-555
+182
+566
+320
+611
 source_node_2
 source_node_2
 0 5 10
 1
 
 CHOOSER
-353
-510
-491
-555
+324
+566
+462
+611
 dest_node_2
 dest_node_2
 0 5 10
 2
 
 TEXTBOX
-54
-376
-204
-400
+21
+412
+171
+436
 Node 5: Cyan
 20
 85.0
 1
 
 TEXTBOX
-53
-400
-234
-433
+20
+436
+201
+469
 Node 10: Yellow
 20
 44.0
 1
 
 SLIDER
-236
-188
-416
-221
+243
+98
+423
+131
 hello-mess-interval
 hello-mess-interval
-50
-150
+5
+100
 50.0
-10
+5
 1
 NIL
 HORIZONTAL
 
 SLIDER
-422
-149
-646
-182
+17
+135
+238
+168
 proactive-broadcast-prob
 proactive-broadcast-prob
 0
+100
+10.0
 1
-0.1
-0.1
 1
-NIL
+%
 HORIZONTAL
 
 SLIDER
-235
-226
-416
-259
+243
+134
+423
+167
 ant-every-n-packets
 ant-every-n-packets
 1
 10
-5.0
+10.0
 1
 1
 NIL
 HORIZONTAL
+
+MONITOR
+10
+762
+207
+831
+NIL
+conn-1-travel-time
+17
+1
+17
+
+MONITOR
+11
+838
+207
+907
+NIL
+conn-2-travel-time
+17
+1
+17
+
+PLOT
+212
+762
+744
+990
+Connection 1 network delay
+NIL
+travel time
+0.0
+10.0
+0.0
+10.0
+true
+false
+"" ""
+PENS
+"first_plot" 1.0 0 -16777216 true "" "ifelse conn-1-travel-time > 0\n[set-plot-pen-color green ]\n[set-plot-pen-color red ]\nplot conn-1-travel-time"
+
+BUTTON
+11
+915
+208
+988
+NIL
+clear-all-plots
+NIL
+1
+T
+OBSERVER
+NIL
+NIL
+NIL
+NIL
+1
+
+PLOT
+749
+762
+1281
+987
+Connection 2 network delay
+NIL
+travel time
+0.0
+10.0
+0.0
+10.0
+true
+false
+"" ""
+PENS
+"default" 1.0 0 -16777216 true "" "ifelse conn-2-travel-time > 0\n[set-plot-pen-color green ]\n[set-plot-pen-color red ]\nplot conn-2-travel-time"
 
 @#$#@#$#@
 ## WHAT IS IT?
