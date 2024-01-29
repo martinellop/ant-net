@@ -8,5 +8,14 @@ This project is part of the exam for the course "Distributed Artificial Intellig
 </p>
 
 <p align="center">
-<img src="demo.gif" />
+<img src="demo_light.gif" />
 </p>
+
+
+
+<p align="center">
+  
+https://github.com/martinellop/ant-net/assets/64253220/48895d3a-9347-4e8d-8b72-1f437131bda5
+
+</p>
+
