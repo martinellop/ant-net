@@ -1,6 +1,6 @@
 breed [nodes node]
-breed [ants ant]
 breed [packets packet]
+breed [ants ant]
 
 nodes-own [
   pheromone-table ;; list where each entry is a list in form [t n v], where t is the target node, n is a linked node and v is a value about the goodness of going to t through n.
@@ -161,6 +161,8 @@ to update-nodes
       ]
     ]
 
+    if use-hello-mess
+    [
     ;let's see if we have to delete some old neighbour form our list
     foreach neighbors-table[ ? ->
       let index position ? neighbors-table
@@ -211,13 +213,13 @@ to update-nodes
       ]
     ]
 
-    ifelse next-hello-mess = 0
-    [
-      set next-hello-mess hello-mess-interval
-      send-hello-messages
+      ifelse next-hello-mess = 0
+      [
+        set next-hello-mess hello-mess-interval
+        send-hello-messages
+      ]
+      [set next-hello-mess next-hello-mess - 1]
     ]
-    [set next-hello-mess next-hello-mess - 1]
-
     ;;check if user chose to use this node as sender
     ifelse (connection_1 and node source_node_1 = self)
     [
@@ -376,7 +378,6 @@ to-report get-way-for-target-node [target use-best?]
   ;; To be executed by a node when it asks itslef which way to take in order to reach the node "target".
   ;; if the return value is nobody, then the "query-node" has no clue. Otherwise, the returned value is the next node to ask for, closer to target.
 
-
   ; first, let's check if we have this node in our neighbours list
   foreach neighbors-table[ ? ->
     if item 0 ? = target
@@ -507,7 +508,7 @@ to send-data-packet
   ;; to be executed by a node
   let source self
   let target target-dest
-  let nextnode get-way-for-target-node target true
+  let nextnode get-way-for-target-node target false ;eventually, change to to true if you want to be greedy
 
   hatch-packets 1[
     set color [color] of source
@@ -616,7 +617,7 @@ to new-packet-arrived-to-node [p]
 
 
   ; if we are here, then the received message was a standard message for somebody else. Let's try to send it to him.
-  let nextnode get-way-for-target-node [target-node] of p true
+  let nextnode get-way-for-target-node [target-node] of p false ;change me to true if you want to be greedy
   ifelse nextnode = nobody
   [
     ask p [set waiting? true]
@@ -903,10 +904,10 @@ end
 ; ------------------------------------
 @#$#@#$#@
 GRAPHICS-WINDOW
-546
-12
-1280
-747
+672
+10
+1286
+625
 -1
 -1
 6.0
@@ -919,10 +920,10 @@ GRAPHICS-WINDOW
 1
 1
 1
--60
-60
--60
-60
+-50
+50
+-50
+50
 0
 0
 1
@@ -964,10 +965,10 @@ NIL
 1
 
 SLIDER
-17
-60
-239
-93
+16
+99
+238
+132
 distance-threshold
 distance-threshold
 1
@@ -996,10 +997,10 @@ NIL
 1
 
 SLIDER
-244
-61
-422
-94
+240
+135
+418
+168
 packet-interval
 packet-interval
 5
@@ -1011,10 +1012,10 @@ NIL
 HORIZONTAL
 
 SLIDER
-17
-98
-238
-131
+16
+135
+237
+168
 movement-speed
 movement-speed
 0.001
@@ -1026,10 +1027,10 @@ NIL
 HORIZONTAL
 
 SWITCH
-245
-24
-422
-57
+240
+100
+417
+133
 net-evolution
 net-evolution
 0
@@ -1037,40 +1038,40 @@ net-evolution
 -1000
 
 CHOOSER
-182
-505
-320
-550
+180
+495
+318
+540
 source_node_1
 source_node_1
-0 5 10
-0
-
-CHOOSER
-324
-505
-462
-550
-dest_node_1
-dest_node_1
 0 5 10
 2
 
+CHOOSER
+322
+495
+460
+540
+dest_node_1
+dest_node_1
+0 5 10
+1
+
 TEXTBOX
-22
-387
-160
-435
+23
+416
+161
+464
 Node 0: Red 
 20
 15.0
 1
 
 SWITCH
-22
-510
-177
-543
+20
+500
+175
+533
 connection_1
 connection_1
 0
@@ -1078,10 +1079,10 @@ connection_1
 -1000
 
 SWITCH
-22
-571
-176
-604
+20
+561
+174
+594
 connection_2
 connection_2
 0
@@ -1089,65 +1090,65 @@ connection_2
 -1000
 
 CHOOSER
-182
-566
-320
-611
+180
+556
+318
+601
 source_node_2
 source_node_2
 0 5 10
-1
+0
 
 CHOOSER
-324
-566
-462
-611
+322
+556
+460
+601
 dest_node_2
 dest_node_2
 0 5 10
 2
 
 TEXTBOX
-21
-412
-171
-436
+22
+441
+172
+465
 Node 5: Cyan
 20
 85.0
 1
 
 TEXTBOX
-20
-436
-201
-469
+21
+465
+202
+498
 Node 10: Yellow
 20
 44.0
 1
 
 SLIDER
-243
-98
-423
-131
+240
+171
+420
+204
 hello-mess-interval
 hello-mess-interval
 5
-100
-50.0
+200
+30.0
 5
 1
 NIL
 HORIZONTAL
 
 SLIDER
-17
-135
-238
-168
+16
+208
+237
+241
 proactive-broadcast-prob
 proactive-broadcast-prob
 0
@@ -1159,10 +1160,10 @@ proactive-broadcast-prob
 HORIZONTAL
 
 SLIDER
-243
-134
-423
-167
+240
+207
+420
+240
 ant-every-n-packets
 ant-every-n-packets
 1
@@ -1174,10 +1175,10 @@ NIL
 HORIZONTAL
 
 MONITOR
-10
-762
-207
-831
+17
+644
+214
+713
 NIL
 conn-1-travel-time
 17
@@ -1185,10 +1186,10 @@ conn-1-travel-time
 17
 
 MONITOR
-11
-838
-207
-907
+18
+720
+214
+789
 NIL
 conn-2-travel-time
 17
@@ -1196,10 +1197,10 @@ conn-2-travel-time
 17
 
 PLOT
-212
-762
-744
-990
+219
+644
+751
+872
 Connection 1 network delay
 NIL
 travel time
@@ -1214,10 +1215,10 @@ PENS
 "first_plot" 1.0 0 -16777216 true "" "ifelse conn-1-travel-time > 0\n[set-plot-pen-color green ]\n[set-plot-pen-color red ]\nplot conn-1-travel-time"
 
 BUTTON
-11
-915
-208
-988
+18
+797
+215
+870
 NIL
 clear-all-plots
 NIL
@@ -1231,10 +1232,10 @@ NIL
 1
 
 PLOT
-749
-762
-1281
-987
+756
+644
+1288
+869
 Connection 2 network delay
 NIL
 travel time
@@ -1247,6 +1248,17 @@ false
 "" ""
 PENS
 "default" 1.0 0 -16777216 true "" "ifelse conn-2-travel-time > 0\n[set-plot-pen-color green ]\n[set-plot-pen-color red ]\nplot conn-2-travel-time"
+
+SWITCH
+16
+171
+237
+204
+use-hello-mess
+use-hello-mess
+0
+1
+-1000
 
 @#$#@#$#@
 ## WHAT IS IT?
